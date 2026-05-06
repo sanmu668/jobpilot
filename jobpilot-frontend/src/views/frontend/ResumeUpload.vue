@@ -142,25 +142,46 @@
               <polyline points="20 6 9 17 4 12"/>
             </svg>
           </div>
-          <h3>分析完成！</h3>
-          <p>AI 已完成简历深度分析，立即查看你的匹配报告</p>
-          <div class="result-preview">
-            <div class="result-score">
-              <strong>85</strong>
-              <span>综合匹配分</span>
-            </div>
-            <div class="result-tags">
-              <span class="tag tag-green">识别到 12 项技能</span>
-              <span class="tag tag-blue">4 条优化建议</span>
-              <span class="tag tag-purple">48 个推荐岗位</span>
-            </div>
-          </div>
-          <router-link to="/analysis" class="view-btn">
+          <h3>上传成功！</h3>
+          <p>简历已上传，点击下方按钮查看 AI 分析报告</p>
+          <router-link :to="{ path: '/analysis', query: { resumeId, jd: jobDescription || undefined } }" class="view-btn">
             查看分析报告
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
             </svg>
           </router-link>
+        </div>
+      </div>
+
+      <!-- Error -->
+      <div v-else-if="uploadState === 'error'" class="upload-card glass-card">
+        <div class="error-state">
+          <div class="error-icon">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"/>
+              <line x1="12" y1="8" x2="12" y2="12"/>
+              <line x1="12" y1="16" x2="12.01" y2="16"/>
+            </svg>
+          </div>
+          <h3>{{ errorTitle }}</h3>
+          <p>{{ uploadError }}</p>
+          <router-link
+            v-if="resumeId"
+            :to="{ path: '/analysis', query: { resumeId, jd: jobDescription || undefined } }"
+            class="upload-btn"
+            style="text-decoration:none; justify-content:center; margin-bottom:10px">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>
+            </svg>
+            前往分析页查看结果
+          </router-link>
+          <button class="upload-btn retry-btn" @click="retryUpload">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="1 4 1 10 7 10"/>
+              <path d="M3.51 15a9 9 0 1 0 .49-3.51"/>
+            </svg>
+            重新上传
+          </button>
         </div>
       </div>
 
@@ -181,6 +202,7 @@
 <script setup>
 import { ref, reactive, computed } from 'vue'
 import { useRouter } from 'vue-router'
+import { uploadResume, runParse, runAnalyze } from '@/api/frontend/resume'
 
 const router = useRouter()
 const fileInput = ref(null)
@@ -189,6 +211,8 @@ const jobDescription = ref('')
 const isDragging = ref(false)
 const uploadState = ref('idle')
 const uploadProgress = ref(0)
+const uploadError = ref('')
+const resumeId = ref(null)
 
 const uploadStages = reactive([
   { label: '文件上传', active: false, done: false },
@@ -239,26 +263,114 @@ const formatFileSize = (bytes) => {
   return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
 }
 
-const startUpload = async () => {
-  uploadState.value = 'uploading'
+const errorTitle = computed(() => {
+  const msg = uploadError.value || ''
+  if (msg.includes('403') || msg.toLowerCase().includes('forbidden')) return '权限不足'
+  if (msg.includes('401') || msg.includes('登录')) return '登录已过期'
+  if (msg.includes('超时') || msg.includes('timeout')) return 'AI 分析超时'
+  if (resumeId.value) return 'AI 分析失败'
+  return '上传失败'
+})
 
-  const stageDurations = [600, 800, 1200, 600]
-  for (let i = 0; i < uploadStages.length; i++) {
-    uploadStages[i].active = true
-    const startPct = i * 25
-    const endPct = (i + 1) * 25
-    const step = (endPct - startPct) / 20
-    for (let p = startPct; p <= endPct; p += step) {
-      uploadProgress.value = Math.round(p)
-      await new Promise(r => setTimeout(r, stageDurations[i] / 20))
+const resetStages = () => {
+  uploadStages.forEach(s => { s.active = false; s.done = false })
+  uploadProgress.value = 0
+}
+
+// Animate progress within [fromPct, toPct*0.88] while task runs, then snap to toPct
+const trackStage = (task, fromPct, toPct, estimatedMs = 4000) => {
+  let cancelled = false
+  const safeEnd = fromPct + (toPct - fromPct) * 0.88
+  const steps = 24
+  const stepMs = estimatedMs / steps
+
+  ;(async () => {
+    for (let i = 0; i <= steps; i++) {
+      if (cancelled) return
+      uploadProgress.value = Math.round(fromPct + (i / steps) * (safeEnd - fromPct))
+      await new Promise(r => setTimeout(r, stepMs))
     }
-    uploadStages[i].active = false
-    uploadStages[i].done = true
-  }
+  })()
 
-  uploadProgress.value = 100
-  await new Promise(r => setTimeout(r, 400))
-  uploadState.value = 'done'
+  return Promise.resolve(task).finally(() => {
+    cancelled = true
+    uploadProgress.value = toPct
+  })
+}
+
+const startUpload = async () => {
+  if (!selectedFile.value) return
+
+  uploadState.value = 'uploading'
+  uploadError.value = ''
+  resumeId.value = null
+  resetStages()
+
+  try {
+    // Stage 1: 上传文件 (0 → 25%)
+    uploadStages[0].active = true
+    const formData = new FormData()
+    formData.append('file', selectedFile.value)
+
+    const uploadRes = await uploadResume(formData, {
+      onUploadProgress: (e) => {
+        if (e.total) uploadProgress.value = Math.round((e.loaded / e.total) * 25)
+      }
+    })
+
+    resumeId.value = uploadRes.resumeId
+    uploadStages[0].active = false
+    uploadStages[0].done = true
+    uploadProgress.value = 25
+
+    // Stage 2: 简历解析 (25 → 50%) — 提交任务 + 轮询直到 done
+    uploadStages[1].active = true
+    await trackStage(runParse(resumeId.value), 25, 50, 8000)
+    uploadStages[1].active = false
+    uploadStages[1].done = true
+
+    // Stage 3: AI 分析 (50 → 75%) — 提交任务 + 轮询直到 done，获取 AnalyzeResponse
+    uploadStages[2].active = true
+    const analyzeResult = await trackStage(
+      runAnalyze(resumeId.value, jobDescription.value),
+      50, 75, 30000
+    )
+    uploadStages[2].active = false
+    uploadStages[2].done = true
+
+    // 缓存分析结果，Analysis.vue 直接读取，无需重复调用 AI
+    sessionStorage.setItem('analysisContext', JSON.stringify({
+      resumeId: resumeId.value,
+      jobDescription: jobDescription.value,
+      result: analyzeResult,
+      createdAt: new Date().toISOString()
+    }))
+
+    // Stage 4: 生成报告 (75 → 100%)
+    uploadStages[3].active = true
+    for (let p = uploadProgress.value; p <= 100; p += 5) {
+      uploadProgress.value = p
+      await new Promise(r => setTimeout(r, 40))
+    }
+    uploadStages[3].active = false
+    uploadStages[3].done = true
+    uploadProgress.value = 100
+
+    await new Promise(r => setTimeout(r, 300))
+    uploadState.value = 'done'
+  } catch (err) {
+    uploadStages.forEach(s => { s.active = false })
+    const msg = err.code === 'ECONNABORTED' || err.message?.includes('timeout')
+      ? '处理超时，AI 分析耗时较长，请稍后在"分析报告"页面查看结果'
+      : (err.message || '上传失败，请重试')
+    uploadError.value = msg
+    uploadState.value = 'error'
+  }
+}
+
+const retryUpload = () => {
+  uploadState.value = 'selected'
+  resetStages()
 }
 </script>
 
@@ -727,6 +839,49 @@ const startUpload = async () => {
 @keyframes success-pop {
   from { transform: scale(0.7); opacity: 0; }
   to { transform: scale(1); opacity: 1; }
+}
+
+.error-state {
+  text-align: center;
+  padding: 20px 0;
+
+  .error-icon {
+    width: 72px;
+    height: 72px;
+    background: linear-gradient(135deg, $danger, #dc2626);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    margin: 0 auto 20px;
+    box-shadow: 0 8px 20px rgba($danger, 0.3);
+    animation: success-pop 0.4s ease;
+  }
+
+  h3 {
+    font-size: 22px;
+    font-weight: 800;
+    color: $text-primary;
+    margin-bottom: 8px;
+  }
+
+  p {
+    font-size: 14px;
+    color: $text-secondary;
+    margin-bottom: 24px;
+  }
+}
+
+.retry-btn {
+  background: linear-gradient(135deg, $danger, #dc2626) !important;
+  box-shadow: 0 4px 16px rgba($danger, 0.35) !important;
+  max-width: 200px;
+  margin: 0 auto;
+
+  &:hover {
+    box-shadow: 0 8px 24px rgba($danger, 0.45) !important;
+  }
 }
 
 .upload-tips {

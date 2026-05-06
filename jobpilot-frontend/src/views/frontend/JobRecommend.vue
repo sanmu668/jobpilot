@@ -130,10 +130,11 @@
 </template>
 
 <script setup>
-import { ref, computed, reactive } from 'vue'
+import { ref, computed, reactive, onMounted } from 'vue'
 
 const viewMode = ref('grid')
 const activeScoreTab = ref('all')
+const analysisContext = ref(null)
 
 const filters = reactive({
   city: '',
@@ -155,15 +156,49 @@ const jobs = ref([
   { id: 8, title: '后端研发工程师', company: 'OPPO', city: '深圳', type: '全职', salary: '18-30K', matchScore: 71, tags: ['Java', 'Spring Boot', 'MySQL', 'RabbitMQ'], posted: '1周前', logoColor: 'linear-gradient(135deg,#6366F1,#4F46E5)', featured: false, saved: false, applied: false },
 ])
 
+const normalizeWords = (text = '') =>
+  (text.match(/[A-Za-z0-9+#.\-]{2,}|[\u4e00-\u9fa5]{2,}/g) || [])
+    .map(item => item.toLowerCase())
+
+const getAnalysisKeywords = () => {
+  const context = analysisContext.value
+  if (!context?.result) return []
+  const result = context.result
+  const sourceText = [
+    context.jobDescription || '',
+    ...(result.advantages || []),
+    ...(result.disadvantages || []),
+    ...(result.suggestions || [])
+  ].join(' ')
+  return Array.from(new Set(normalizeWords(sourceText))).slice(0, 30)
+}
+
+const scoredJobs = computed(() => {
+  const keywords = getAnalysisKeywords()
+  if (!keywords.length) return [...jobs.value]
+
+  return jobs.value.map(job => {
+    const haystack = `${job.title} ${job.company} ${job.tags.join(' ')}`.toLowerCase()
+    const hitCount = keywords.reduce((count, keyword) => {
+      return count + (haystack.includes(keyword) ? 1 : 0)
+    }, 0)
+    const bonus = Math.min(18, hitCount * 3)
+    return {
+      ...job,
+      matchScore: Math.min(99, job.matchScore + bonus)
+    }
+  })
+})
+
 const scoreTabs = computed(() => [
-  { label: '全部', value: 'all', count: jobs.value.length },
-  { label: '90+ 极匹配', value: '90', count: jobs.value.filter(j => j.matchScore >= 90).length },
-  { label: '80+ 高匹配', value: '80', count: jobs.value.filter(j => j.matchScore >= 80 && j.matchScore < 90).length },
-  { label: '70+ 匹配', value: '70', count: jobs.value.filter(j => j.matchScore >= 70 && j.matchScore < 80).length },
+  { label: '全部', value: 'all', count: scoredJobs.value.length },
+  { label: '90+ 极匹配', value: '90', count: scoredJobs.value.filter(j => j.matchScore >= 90).length },
+  { label: '80+ 高匹配', value: '80', count: scoredJobs.value.filter(j => j.matchScore >= 80 && j.matchScore < 90).length },
+  { label: '70+ 匹配', value: '70', count: scoredJobs.value.filter(j => j.matchScore >= 70 && j.matchScore < 80).length },
 ])
 
 const filteredJobs = computed(() => {
-  let result = [...jobs.value]
+  let result = [...scoredJobs.value]
 
   if (activeScoreTab.value === '90') result = result.filter(j => j.matchScore >= 90)
   else if (activeScoreTab.value === '80') result = result.filter(j => j.matchScore >= 80 && j.matchScore < 90)
@@ -193,6 +228,16 @@ const getScoreClass = (score) => {
 const toggleSave = (job) => { job.saved = !job.saved }
 const applyJob = (job) => { job.applied = true }
 const resetFilters = () => { Object.assign(filters, { city: '', salary: '', type: '', keyword: '' }) }
+
+onMounted(() => {
+  const raw = sessionStorage.getItem('analysisContext')
+  if (!raw) return
+  try {
+    analysisContext.value = JSON.parse(raw)
+  } catch (error) {
+    analysisContext.value = null
+  }
+})
 </script>
 
 <style lang="scss" scoped>

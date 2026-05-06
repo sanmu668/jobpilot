@@ -1,12 +1,30 @@
 <template>
   <div class="analysis-page page-container">
+
+    <!-- Loading overlay -->
+    <div v-if="loading" class="state-overlay">
+      <div class="state-box">
+        <div class="spin-ring"></div>
+        <p>AI 分析中，正在等待结果…</p>
+      </div>
+    </div>
+
+    <!-- Error banner -->
+    <div v-if="fetchError" class="error-banner">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+      </svg>
+      {{ fetchError }}
+      <button @click="fetchError = ''">✕</button>
+    </div>
+
     <div class="page-header">
       <div>
         <h1 class="page-title">AI 分析报告</h1>
-        <p class="page-subtitle">简历：前端工程师_张明.pdf · 分析于 2026-05-03</p>
+        <p class="page-subtitle">{{ pageSubtitle }}</p>
       </div>
       <div class="header-actions">
-        <button class="btn-ghost" @click="reAnalyze">
+        <button class="btn-ghost" :disabled="loading" @click="reAnalyze">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
             <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
@@ -136,7 +154,7 @@
           <div v-for="(skill, i) in radarSkills" :key="skill.name" class="legend-item">
             <span class="legend-dot" style="background: #4DA3FF"></span>
             <span>{{ skill.name }}</span>
-            <strong>{{ skill.value }}%</strong>
+            <strong>{{ skill.score ?? skill.value }}%</strong>
           </div>
         </div>
       </div>
@@ -227,24 +245,100 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
+import { analyzeResume } from '@/api/frontend/resume'
 
+const route = useRoute()
 const router = useRouter()
 
-const targetScore = 85
+// ── State ──────────────────────────────────────────────────────────────────
+const loading = ref(false)
+const fetchError = ref('')
+const resumeId = ref(null)
+const jobDescription = ref('')
+const analysisData = ref(null)   // full normalized response from backend
+const targetScore = ref(0)
 const animatedScore = ref(0)
+const pageSubtitle = ref('AI 简历分析报告')
 
-onMounted(() => {
-  let start = 0
-  const step = () => {
-    start += 2
-    animatedScore.value = Math.min(start, targetScore)
-    if (start < targetScore) requestAnimationFrame(step)
+// ── Boot: load from sessionStorage, fall back to API ──────────────────────
+onMounted(async () => {
+  const cached = sessionStorage.getItem('analysisContext')
+  if (cached) {
+    try {
+      const ctx = JSON.parse(cached)
+      applyAnalysisData(ctx.result, ctx.resumeId, ctx.jobDescription)
+      pageSubtitle.value = ctx.jobDescription
+        ? `目标岗位：${ctx.jobDescription}`
+        : `简历 ID：${ctx.resumeId}`
+      return
+    } catch (_) { /* fall through */ }
   }
-  requestAnimationFrame(step)
+
+  const idParam = route.query.resumeId
+  if (idParam) {
+    loading.value = true
+    try {
+      const res = await analyzeResume(Number(idParam), route.query.jd || '')
+      applyAnalysisData(res, Number(idParam), route.query.jd || '')
+      pageSubtitle.value = route.query.jd ? `目标岗位：${route.query.jd}` : `简历 ID：${idParam}`
+    } catch (e) {
+      fetchError.value = e.message || '分析数据加载失败'
+    } finally {
+      loading.value = false
+    }
+  }
 })
 
+// Normalize both new schema {score,level,summary,dimensions,radar,skills,suggestions}
+// and legacy schema {score,advantages,disadvantages,suggestions[]}
+const normalizeAnalysisData = (raw = {}) => {
+  const d = raw.data ?? raw
+  return {
+    score:      Number(d.score) || 0,
+    level:      d.level   || '',
+    summary:    d.summary || '',
+    dimensions: Array.isArray(d.dimensions) ? d.dimensions : [],
+    radar:      Array.isArray(d.radar)      ? d.radar      : [],
+    skills: {
+      matched: Array.isArray(d.skills?.matched)  ? d.skills.matched
+               : Array.isArray(d.advantages)      ? d.advantages    : [],
+      partial: Array.isArray(d.skills?.partial)  ? d.skills.partial : [],
+      missing: Array.isArray(d.skills?.missing)  ? d.skills.missing
+               : Array.isArray(d.disadvantages)  ? d.disadvantages  : [],
+    },
+    suggestions: Array.isArray(d.suggestions) ? d.suggestions : [],
+  }
+}
+
+const applyAnalysisData = (result, id, jd) => {
+  const n = normalizeAnalysisData(result)
+  analysisData.value = n
+  resumeId.value = id
+  jobDescription.value = jd
+  targetScore.value = n.score
+  runScoreAnimation(n.score)
+}
+
+// ── Score animation ────────────────────────────────────────────────────────
+const runScoreAnimation = (target) => {
+  animatedScore.value = 0
+  let cur = 0
+  const step = () => {
+    cur += 2
+    animatedScore.value = Math.min(cur, target)
+    if (cur < target) requestAnimationFrame(step)
+  }
+  requestAnimationFrame(step)
+}
+
+// ── Computed from real data ────────────────────────────────────────────────
 const scoreGrade = computed(() => {
+  const level = analysisData.value?.level
+  if (level) {
+    const map = { '高度匹配': 'excellent', '良好匹配': 'good', '中等匹配': 'medium', '匹配较低': 'poor', '匹配较弱': 'poor' }
+    return { label: level, class: map[level] ?? 'medium' }
+  }
   const s = animatedScore.value
   if (s >= 85) return { label: '高度匹配', class: 'excellent' }
   if (s >= 70) return { label: '良好匹配', class: 'good' }
@@ -252,128 +346,165 @@ const scoreGrade = computed(() => {
   return { label: '匹配较低', class: 'poor' }
 })
 
-const fitData = {
-  icon: '🚀',
-  label: '强匹配',
-  desc: '你的背景与该岗位高度吻合，建议立即投递',
-  class: 'strong'
+const fitData = computed(() => {
+  const s = targetScore.value
+  const level   = analysisData.value?.level   || ''
+  const summary = analysisData.value?.summary || ''
+  if (s >= 80 || level.includes('高度'))
+    return { icon: '🚀', label: level || '强匹配',   desc: summary || '你的背景与该岗位高度吻合，建议立即投递', class: 'strong' }
+  if (s >= 60 || level.includes('良好') || level.includes('中等'))
+    return { icon: '✅', label: level || '良好匹配', desc: summary || '基本符合岗位要求，可以尝试投递',         class: 'medium' }
+  return       { icon: '⚠️', label: level || '匹配较弱', desc: summary || '建议针对岗位需求进行简历优化后再投递', class: 'weak'   }
+})
+
+const DIM_COLORS = [
+  'linear-gradient(90deg,#4DA3FF,#7C3AED)',
+  'linear-gradient(90deg,#10B981,#4DA3FF)',
+  'linear-gradient(90deg,#7C3AED,#4DA3FF)',
+  'linear-gradient(90deg,#F59E0B,#EF4444)',
+  'linear-gradient(90deg,#EF4444,#F59E0B)',
+  'linear-gradient(90deg,#4DA3FF,#10B981)',
+]
+
+const fitBreakdown = computed(() => {
+  const dims = analysisData.value?.dimensions
+  if (dims?.length) {
+    return dims.map((d, i) => ({ name: d.name, score: d.score, color: DIM_COLORS[i % DIM_COLORS.length] }))
+  }
+  const s = targetScore.value
+  return [
+    { name: '技能匹配', score: Math.min(100, s + 3), color: DIM_COLORS[0] },
+    { name: '经验匹配', score: Math.max(0, s - 5),   color: DIM_COLORS[1] },
+    { name: '学历匹配', score: Math.min(100, s + 8), color: DIM_COLORS[2] },
+    { name: '项目匹配', score: Math.max(0, s - 10),  color: DIM_COLORS[3] },
+  ]
+})
+
+const matchedSkills = computed(() => analysisData.value?.skills?.matched ?? analysisData.value?.advantages ?? [])
+const partialSkills  = computed(() => analysisData.value?.skills?.partial ?? [])
+const missingSkills  = computed(() => analysisData.value?.skills?.missing ?? analysisData.value?.disadvantages ?? [])
+
+// Icon/color lookup by suggestion type from backend; fallback cycles through defaults
+const SUGGESTION_TYPE_MAP = {
+  '技能补强':   { icon: '💪', bg: 'rgba(124,58,237,0.1)',  impact: 'high',   gain: 12 },
+  '量化成果':   { icon: '📊', bg: 'rgba(77,163,255,0.1)',  impact: 'high',   gain: 15 },
+  '关键词优化': { icon: '🔑', bg: 'rgba(239,68,68,0.1)',   impact: 'medium', gain: 10 },
+  '经验描述':   { icon: '✍️', bg: 'rgba(16,185,129,0.1)',  impact: 'medium', gain: 8  },
+  '项目亮点':   { icon: '🎯', bg: 'rgba(245,158,11,0.1)',  impact: 'high',   gain: 11 },
+  '证书认证':   { icon: '🏆', bg: 'rgba(59,130,246,0.1)',  impact: 'low',    gain: 6  },
+  '格式优化':   { icon: '📋', bg: 'rgba(16,185,129,0.1)',  impact: 'low',    gain: 5  },
+  '语言表达':   { icon: '🗣️', bg: 'rgba(245,158,11,0.1)',  impact: 'medium', gain: 7  },
 }
-
-const fitBreakdown = [
-  { name: '技能匹配', score: 88, color: 'linear-gradient(90deg,#4DA3FF,#7C3AED)' },
-  { name: '经验匹配', score: 82, color: 'linear-gradient(90deg,#10B981,#4DA3FF)' },
-  { name: '学历匹配', score: 90, color: 'linear-gradient(90deg,#7C3AED,#4DA3FF)' },
-  { name: '项目匹配', score: 75, color: 'linear-gradient(90deg,#F59E0B,#EF4444)' },
+const SUGGESTION_DEFAULT = [
+  { icon: '📊', bg: 'rgba(77,163,255,0.1)',  impact: 'high',   gain: 12 },
+  { icon: '💪', bg: 'rgba(124,58,237,0.1)',  impact: 'medium', gain: 8  },
+  { icon: '🎯', bg: 'rgba(245,158,11,0.1)',  impact: 'high',   gain: 15 },
+  { icon: '✍️', bg: 'rgba(16,185,129,0.1)',  impact: 'low',    gain: 6  },
+  { icon: '🔑', bg: 'rgba(239,68,68,0.1)',   impact: 'medium', gain: 10 },
+  { icon: '📈', bg: 'rgba(59,130,246,0.1)',  impact: 'high',   gain: 11 },
 ]
 
-const quickStats = [
-  { icon: '🎯', label: '技能覆盖', value: '12/15', color: '#4DA3FF' },
-  { icon: '⚡', label: '优化建议', value: '4 条', color: '#7C3AED' },
-  { icon: '📋', label: '推荐岗位', value: '48', color: '#10B981' },
-  { icon: '📈', label: '提升空间', value: '+15%', color: '#F59E0B' },
-]
+const suggestions = computed(() => {
+  const raw = analysisData.value?.suggestions ?? []
+  return raw.map((item, i) => {
+    const isObj = typeof item === 'object' && item !== null
+    const type  = isObj ? (item.type    || '') : ''
+    const text  = isObj ? (item.content || '') : (() => {
+      const t = String(item)
+      const ci = t.search(/[：:。.，,]/)
+      return ci > 0 ? t.slice(ci + 1).trim() : t
+    })()
+    const title = type || ((() => {
+      const t = String(isObj ? item.content || '' : item)
+      const ci = t.search(/[：:。.，,]/)
+      return ci > 0 ? t.slice(0, ci).trim().slice(0, 20) : `建议 ${i + 1}`
+    })())
+    const meta = SUGGESTION_TYPE_MAP[type] || SUGGESTION_DEFAULT[i % SUGGESTION_DEFAULT.length]
+    return { ...meta, title: title.slice(0, 20), desc: text }
+  })
+})
 
-const radarSkills = [
-  { name: '编程语言', value: 90 },
-  { name: '框架能力', value: 82 },
-  { name: '系统设计', value: 70 },
-  { name: '数据库', value: 75 },
-  { name: '云原生', value: 55 },
-  { name: '项目管理', value: 65 },
+const quickStats = computed(() => [
+  { icon: '🎯', label: '技能覆盖', value: `${matchedSkills.value.length} 项`, color: '#4DA3FF' },
+  { icon: '⚡', label: '优化建议', value: `${suggestions.value.length} 条`,  color: '#7C3AED' },
+  { icon: '📋', label: '待提升项', value: `${missingSkills.value.length} 项`, color: '#EF4444' },
+  { icon: '📈', label: '综合得分', value: `${targetScore.value} 分`,          color: '#F59E0B' },
+])
+
+// ── Radar: API-driven; generic axes as fallback when backend omits radar ───
+const GENERIC_RADAR = [
+  { name: '专业技能', score: 75 },
+  { name: '项目经验', score: 70 },
+  { name: '学历背景', score: 80 },
+  { name: '综合能力', score: 72 },
+  { name: '岗位适配', score: 68 },
+  { name: '发展潜力', score: 65 },
 ]
+const radarSkills = computed(() => {
+  const r = analysisData.value?.radar ?? []
+  return r.length >= 3 ? r : GENERIC_RADAR
+})
 
 const getAngle = (i, total) => (i / total) * Math.PI * 2 - Math.PI / 2
 const cx = 150, cy = 150, maxR = 120
 
 const radarAxes = computed(() =>
-  radarSkills.map((s, i) => {
-    const angle = getAngle(i, radarSkills.length)
-    const lx = cx + (maxR + 20) * Math.cos(angle)
-    const ly = cy + (maxR + 20) * Math.sin(angle)
+  radarSkills.value.map((s, i) => {
+    const angle = getAngle(i, radarSkills.value.length)
     return {
       x2: cx + maxR * Math.cos(angle),
       y2: cy + maxR * Math.sin(angle),
-      lx, ly,
+      lx: cx + (maxR + 20) * Math.cos(angle),
+      ly: cy + (maxR + 20) * Math.sin(angle),
       label: s.name
     }
   })
 )
 
 const getHexPoints = (r) =>
-  radarSkills.map((_, i) => {
-    const angle = getAngle(i, radarSkills.length)
+  radarSkills.value.map((_, i) => {
+    const angle = getAngle(i, radarSkills.value.length)
     return `${cx + r * Math.cos(angle)},${cy + r * Math.sin(angle)}`
   }).join(' ')
 
 const radarDataPoints = computed(() =>
-  radarSkills.map((s, i) => {
-    const angle = getAngle(i, radarSkills.length)
-    const r = (s.value / 100) * maxR
+  radarSkills.value.map((s, i) => {
+    const angle = getAngle(i, radarSkills.value.length)
+    const r = ((s.score ?? s.value ?? 0) / 100) * maxR
     return `${cx + r * Math.cos(angle)},${cy + r * Math.sin(angle)}`
   }).join(' ')
 )
 
 const radarDots = computed(() =>
-  radarSkills.map((s, i) => {
-    const angle = getAngle(i, radarSkills.length)
-    const r = (s.value / 100) * maxR
+  radarSkills.value.map((s, i) => {
+    const angle = getAngle(i, radarSkills.value.length)
+    const r = ((s.score ?? s.value ?? 0) / 100) * maxR
     return { x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) }
   })
 )
 
-const matchedSkills = ['Java', 'Spring Boot', 'MySQL', 'Redis', 'Git', 'Linux', 'Vue.js']
-const partialSkills = ['Docker', 'Elasticsearch', 'RabbitMQ']
-const missingSkills = ['Kubernetes', 'Apache Flink', 'ClickHouse']
-
-const suggestions = [
-  {
-    icon: '📊',
-    title: '添加量化指标',
-    desc: '在项目经历中加入具体数字，如"优化接口响应时间 40%"，可显著提升说服力。',
-    gain: 12,
-    impact: 'high',
-    bg: 'rgba(77,163,255,0.1)'
-  },
-  {
-    icon: '💪',
-    title: '强化动作动词',
-    desc: '将"负责"改为"主导"、"设计"、"优化"等强动词，让经历更有力量。',
-    gain: 8,
-    impact: 'medium',
-    bg: 'rgba(124,58,237,0.1)'
-  },
-  {
-    icon: '🎯',
-    title: '补充 K8s 技能',
-    desc: '目标岗位要求 Kubernetes，建议补充相关经验或学习认证。',
-    gain: 15,
-    impact: 'high',
-    bg: 'rgba(245,158,11,0.1)'
-  },
-  {
-    icon: '✍️',
-    title: '优化个人简介',
-    desc: '当前个人简介过于普通，建议突出核心竞争力和技术方向。',
-    gain: 6,
-    impact: 'low',
-    bg: 'rgba(16,185,129,0.1)'
+// ── Actions ────────────────────────────────────────────────────────────────
+const reAnalyze = async () => {
+  if (!resumeId.value) return
+  loading.value = true
+  fetchError.value = ''
+  try {
+    const res = await analyzeResume(resumeId.value, jobDescription.value)
+    applyAnalysisData(res, resumeId.value, jobDescription.value)
+    sessionStorage.setItem('analysisContext', JSON.stringify({
+      resumeId: resumeId.value,
+      jobDescription: jobDescription.value,
+      result: analysisData.value,
+      createdAt: new Date().toISOString()
+    }))
+  } catch (e) {
+    fetchError.value = e.message || '重新分析失败'
+  } finally {
+    loading.value = false
   }
-]
-
-const reAnalyze = () => {
-  animatedScore.value = 0
-  setTimeout(() => {
-    let start = 0
-    const step = () => {
-      start += 2
-      animatedScore.value = Math.min(start, targetScore)
-      if (start < targetScore) requestAnimationFrame(step)
-    }
-    requestAnimationFrame(step)
-  }, 100)
 }
 
-const goOptimize = () => router.push('/optimize')
+const goOptimize = () => router.push({ path: '/optimize', query: { resumeId: resumeId.value } })
 </script>
 
 <style lang="scss" scoped>
