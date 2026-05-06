@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ai.jobpilotbackend.resume.mapper.ResumeMapper">
+
+    <!-- 通用结果映射 -->
+    <resultMap id="BaseResultMap" type="com.ai.jobpilotbackend.resume.entity.Resume">
+        <!-- 这里写字段映射 -->
+        <id property="id" column="id"/>
+        <result column="user_id" property="userId"/>
+        <result column="file_name" property="fileName"/>
+        <result column="file_url" property="fileUrl"/>
+        <result column="file_type" property="fileType"/>
+        <result column="raw_text" property="rawText"/>
+        <result column="parse_status" property="parseStatus"/>
+        <result column="created_at" property="createdAt"/>
+        <result column="updated_at" property="updatedAt"/>
+    </resultMap>
+
+    <!-- 通用列片段 -->
+    <sql id="Base_Column_List">
+        <!-- 这里写列名 -->
+        id, user_id, file_name, file_url, file_type, raw_text, parse_status, created_at, updated_at
+    </sql>
+
+    <!--新增简历 -->
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        insert into resume(user_id, file_name, file_url, file_type, raw_text, parse_status, created_at, updated_at)
+        values (#{userId}, #{fileName}, #{fileUrl}, #{fileType}, #{rawText}, #{parseStatus}, now(), now())
+    </insert>
+    
+    <!--根据ID查询简历-->
+    <select id="findById" parameterType="java.lang.Long" resultMap="BaseResultMap">
+        select
+        <include refid="Base_Column_List"/>
+        from resume
+        where id = #{id}
+    </select>
+
+    <!-- 更新简历状态 -->
+    <update id="updateParseStatus" parameterType="map">
+        UPDATE resume SET parse_status = #{status} WHERE id = #{id}
+    </update>
+</mapper>
